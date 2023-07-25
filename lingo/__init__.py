@@ -326,7 +326,8 @@ def get_cmd(ARGS):
         cmd += '--use_lora 1 --quantization-bit {} --lora_rank {} '.format(ARGS['Quantization'], ARGS['lora_rank'])
     if ARGS['method'] == 'LOMO':  # TODO LOMO必须要ZeRO-Stage3和bf16
         cmd += '--use_lomo 1 '
-
+    if ARGS['rope_scaling'] == True:
+        cmd += '--rope_scaling True '
 
 
     if ARGS['train continue'] == False:
