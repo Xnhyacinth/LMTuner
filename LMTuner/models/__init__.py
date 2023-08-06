@@ -1,10 +1,14 @@
 from sat import AutoModel
 from sat.model.finetune import PTuningV2Mixin
-from lingo.lora import LoraMixin
-from lingo.models.model_io import load_checkpoint
+from LMTuner.lora import LoraMixin
+from LMTuner.models.model_io import load_checkpoint
 from sat.mpu import get_model_parallel_world_size, get_model_parallel_rank, get_model_parallel_group
+from sat.model.mixins import CachedAutoregressiveMixin
+from sat.generation.autoregressive_sampling import filling_sequence
+from sat.generation.sampling_strategies import BaseStrategy, BeamSearchStrategy
 
 from lingo.quantization import quantize
+import torch
 from transformers import AutoTokenizer, LlamaTokenizer, GPT2Tokenizer
 
 
@@ -39,7 +43,7 @@ def get_model_and_tokenizer(args):
                     input_ids = input_ids + [tokenizer.pad_token_id] * pad_len
                     labels = labels + [tokenizer.pad_token_id] * pad_len
 
-                    if 130004 in input_ids[:args.max_seq_length-1]:
+                    if 130004 in input_ids[:args.max_seq_length - 1]:
                         model_inputs["input_ids"].append(input_ids[:args.max_seq_length])
                         model_inputs["labels"].append(labels[:args.max_seq_length])
 
@@ -71,7 +75,6 @@ def get_model_and_tokenizer(args):
 
                     input_ids = input_id + (args.max_seq_length - seq_length) * [tokenizer.pad_token_id]
                     labels = label + (args.max_seq_length - seq_length) * [-100]
-
 
                     model_inputs["input_ids"].append(input_ids[:args.max_seq_length])
                     model_inputs["labels"].append(labels[:args.max_seq_length])
@@ -105,7 +108,7 @@ def get_model_and_tokenizer(args):
                     input_ids = [i + 20000 for i in input_id] + (args.max_seq_length - seq_length) * [20003]
                     labels = [i + 20000 for i in label] + (args.max_seq_length - seq_length) * [-100]
 
-                    if 150004 in input_ids[:args.max_seq_length-1]:
+                    if 150004 in input_ids[:args.max_seq_length - 1]:
                         model_inputs["input_ids"].append(input_ids[:args.max_seq_length])
                         model_inputs["labels"].append(labels[:args.max_seq_length])
 
@@ -141,7 +144,6 @@ def get_model_and_tokenizer(args):
                     input_ids = input_id + (args.max_seq_length - seq_length) * [tokenizer.pad_token_id]
                     labels = label + (args.max_seq_length - seq_length) * [-100]
 
-
                     model_inputs["input_ids"].append(input_ids[:args.max_seq_length])
                     model_inputs["labels"].append(labels[:args.max_seq_length])
 
@@ -172,7 +174,7 @@ def get_model_and_tokenizer(args):
             args.model_parallel_size = 1
         elif args.models == 'llama2-13b':
             args.hidden_size = 5120
-            args.num_attention_heads =40
+            args.num_attention_heads = 40
             args.n_kv_heads = None
             args.vocab_size = 32000
             args.num_layers = 40
@@ -214,7 +216,6 @@ def get_model_and_tokenizer(args):
                     input_ids = input_id + (args.max_seq_length - seq_length) * [tokenizer.pad_token_id]
                     labels = label + (args.max_seq_length - seq_length) * [-100]
 
-
                     model_inputs["input_ids"].append(input_ids[:args.max_seq_length])
                     model_inputs["labels"].append(labels[:args.max_seq_length])
 
@@ -248,7 +249,6 @@ def get_model_and_tokenizer(args):
 
                     input_ids = input_id + (args.max_seq_length - seq_length) * [tokenizer.pad_token_id]
                     labels = label + (args.max_seq_length - seq_length) * [-100]
-
 
                     model_inputs["input_ids"].append(input_ids[:args.max_seq_length])
                     model_inputs["labels"].append(labels[:args.max_seq_length])
@@ -284,7 +284,6 @@ def get_model_and_tokenizer(args):
                     input_ids = input_id + (args.max_seq_length - seq_length) * [tokenizer.pad_token_id]
                     labels = label + (args.max_seq_length - seq_length) * [-100]
 
-
                     model_inputs["input_ids"].append(input_ids[:args.max_seq_length])
                     model_inputs["labels"].append(labels[:args.max_seq_length])
 
@@ -293,7 +292,6 @@ def get_model_and_tokenizer(args):
     else:
         print(f'[ERROR] No Support {args.models}')
         exit(0)
-
 
     args.dataset_function = preprocess_function_train
 
@@ -305,7 +303,8 @@ def get_model_and_tokenizer(args):
                 # If you use lora on other "normal" Transformer, just use it with head_first=False (by default)
                 self.add_mixin("lora", LoraMixin(args.num_layers, args.lora_rank, qlora=False, head_first=False,
                                                  num_attention_heads=args.num_attention_heads,
-                                                 hidden_size_per_attention_head=args.hidden_size // args.num_attention_heads,tp_parallel=args.model_parallel_size),
+                                                 hidden_size_per_attention_head=args.hidden_size // args.num_attention_heads,
+                                                 tp_parallel=args.model_parallel_size),
                                reinit=True)
             if args.use_ptuning:
                 self.add_mixin("ptuning", PTuningV2Mixin(args.num_layers, args.hidden_size // args.num_attention_heads,
@@ -320,6 +319,44 @@ def get_model_and_tokenizer(args):
             group.add_argument('--use_lora', action="store_true")
             group.add_argument('--batch_size', type=int, default=1)
             return super().add_model_specific_args(parser)
+
+        @torch.no_grad()
+        def generate(self, input_prompts, tokenizer):
+
+            args = self.args
+            assert args.has_attr('strategy') and args.has_attr('temperature') and args.has_attr(
+                'top_p') and args.has_attr('top_k'), 'Please set the generation args'
+
+            strategy = args.strategy
+            if strategy == 'beam_serach':
+                strategy = BeamSearchStrategy(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+                                              end_tokens=[tokenizer.eos_token_id], num_beams=args.num_beams,
+                                              consider_end=True)
+
+            else:
+                strategy = BaseStrategy(temperature=args.temperature, top_p=args.top_p, top_k=args.top_k,
+                                        end_tokens=[tokenizer.eos_token_id])
+
+            response_list = []
+            for prompt in input_prompts:
+                inputs = \
+                    tokenizer([prompt], return_tensors="pt").to(self.parameters().__next__().device)[
+                        'input_ids'][0]
+                seq = torch.cat(
+                    [inputs, torch.tensor([-1] * (args.max_length - len(inputs)), device=inputs.device)], dim=0
+                ).to(get_model_parallel_rank())
+
+                output = filling_sequence(
+                    self, seq,
+                    batch_size=1,
+                    strategy=strategy
+                )[0]
+
+                output_list = list(output)
+
+                response = tokenizer.decode(output_list[0])
+                response_list.append(response)
+            return response_list
 
         def disable_untrainable_params(self):
             enable = []

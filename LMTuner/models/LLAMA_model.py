@@ -2,13 +2,13 @@ from sat.model import BaseMixin, BaseModel
 import torch
 import torch.nn as nn
 
-from lingo.models.GPT2_model import GPT2AttnMixin
+from LMTuner.models.GPT2_model import GPT2AttnMixin
 from sat.transformer_defaults import standard_attention
 from sat.mpu.utils import split_tensor_along_last_dim
 from sat.model.position_embedding.rotary_embeddings import RotaryEmbedding, rotate_half
 import torch.nn.functional as F
 from sat.mpu import ColumnParallelLinear
-from lingo.scaled_rope.modelling_llama import (
+from LMTuner.scaled_rope.modelling_llama import (
     LlamaDynamicNTKScalingRotaryEmbedding,
     LlamaLinearScalingRotaryEmbedding,
     LlamaNTKByPartsRotaryEmbedding,
@@ -101,14 +101,15 @@ class RotaryMixin(BaseMixin):
         cos, sin = origin.rotary_emb(
             value_layer, seq_len=kw_args['position_ids'].max() + 1
         )
-        if origin.config.rope_scaling["type"] == "xpos":
-            query_layer, key_layer = origin.rotary_emb.apply_rotary_pos_emb(
-                query_layer, key_layer, cos, sin, kw_args['position_ids']
-            )
-        else:
-            query_layer, key_layer = apply_rotary_pos_emb(
-                query_layer, key_layer, cos, sin, kw_args['position_ids']
-            )
+        if origin.config.rope_scaling:
+            if origin.config.rope_scaling["type"] == "xpos":
+                query_layer, key_layer = origin.rotary_emb.apply_rotary_pos_emb(
+                    query_layer, key_layer, cos, sin, kw_args['position_ids']
+                )
+            else:
+                query_layer, key_layer = apply_rotary_pos_emb(
+                    query_layer, key_layer, cos, sin, kw_args['position_ids']
+                )
 
         context_layer = attention_fn(
             query_layer, key_layer, value_layer, mask, dropout_fn, **kw_args

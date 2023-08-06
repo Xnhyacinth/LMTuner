@@ -1,11 +1,11 @@
 from sat import mpu, get_args, get_tokenizer
-from lingo.trainer import training_main
-from lingo.initialize import initialize
+from LMTuner.trainer import training_main
+from LMTuner.initialize import initialize
 import torch,json
 import time
-from lingo.models import get_model_and_tokenizer
-from lingo.dataset import LingoDataset
-from lingo.setting import *
+from LMTuner.models import get_model_and_tokenizer
+from LMTuner.dataset import LingoDataset
+from LMTuner.setting import *
 
 from transformers import DataCollatorForSeq2Seq
 from datasets import Dataset
@@ -98,10 +98,6 @@ def forward_step(data_iterator, model, args, timers,lr=None):
 
 
     logits, *_  = model(input_ids=tokens.to(torch.int64))
-    if torch.distributed.get_rank() == 0:
-        print('tokens',tokens)
-        print('labels',labels)
-        print('logits',logits.argmax(2))
     dtype = logits.dtype
     lm_logits = logits.to(torch.float32)
 
@@ -129,17 +125,15 @@ def create_dataset_function(path, args):
 
     if args.dataset in LINGO_SUPPORT_DATASET:
         lingo_dataset = LingoDataset(args.dataset)
-        if args.model_name:
-            lingo_dataset.set_model_name(args.model_name)
-        dataset = lingo_dataset.turn_conversations_to_io()
+        data = lingo_dataset.turn_conversations_to_io()
     else:
         data = [json.loads(i) for i in open(args.dataset, encoding='utf-8').readlines()]
-        def _gen():
-            for i in data:
-                if len(i) == 2:
-                    if type(i['input']) == str and type(i['output']) == str:
-                        yield i
-        dataset = Dataset.from_generator(_gen)
+    def _gen():
+        for i in data:
+            if len(i) == 2:
+                if type(i['input']) == str and type(i['output']) == str:
+                    yield i
+    dataset = Dataset.from_generator(_gen)
 
 
     dataset = dataset.map(args.dataset_function, batched=True,remove_columns=['input','output'],
@@ -163,8 +157,8 @@ if __name__ == '__main__':
         py_parser.add_argument('--use_ptuning', action="store_true")
         py_parser.add_argument('--use_lora', type=bool,default=False)
         py_parser.add_argument('--use_lomo', type=bool,default=False)
-        py_parser.add_argument('--save_lora_path',type=str,default='')
-        py_parser.add_argument('--load_lora_path',type=str,default='')
+        py_parser.add_argument('--lora_save',type=str,default='')
+        py_parser.add_argument('--lora_load',type=str,default='')
 
         py_parser.add_argument('--models', type=str, default="")
         py_parser.add_argument('--dataset', type=str, default="")
@@ -175,8 +169,6 @@ if __name__ == '__main__':
         py_parser.add_argument('--rope_scaling', type=bool, default=False)
 
     args = initialize(extra_args_provider=add_generation_specific_args)
-
-
     if args.wandb:
         import wandb
         from pynvml import *
@@ -196,6 +188,7 @@ if __name__ == '__main__':
                         "dataset": args.dataset,
                         "time": time.strftime('%Y-%m-%d-%H-%M-%S',time.localtime(time.time())),
                         "save interval": args.save_interval,
+                        "save": args.save,
                         "learn_rate": args.lr,
                         "batch size": args.batch_size,
                         "GPU": pynvml.nvmlDeviceGetName(handle),
@@ -213,6 +206,7 @@ if __name__ == '__main__':
                     "dataset": args.dataset,
                     "time": time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime(time.time())),
                     "save interval": args.save_interval,
+                    "save": args.save,
                     "learn_rate": args.lr,
                     "batch size": args.batch_size,
                     "GPU": pynvml.nvmlDeviceGetName(handle),
